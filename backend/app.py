@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, logger
 from fastapi.exceptions import HTTPException
 from contextlib import asynccontextmanager
 from supabase import create_client
@@ -7,6 +7,7 @@ import os
 from pydantic import BaseModel, EmailStr
 import uuid
 from functools import lru_cache
+import keras
 import asyncio 
 import yfinance as yf
 
@@ -19,6 +20,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 TABLE_NAME = os.getenv("TABLE")
 
+global db
+models = {}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -28,10 +32,29 @@ async def lifespan(app: FastAPI):
         app (FastAPI): the app instance used by FastAPI
     """
     global db
+    global models
+    
     db = create_client(SUPABASE_URL, SUPABASE_KEY)
+    models['base_gru'] = keras.models.load_model('./models/gru.keras')
+    models['base_lstm'] = keras.models.load_model('./models/lstm.keras')
+    models['base_rnn'] = keras.models.load_model('./models/rnn.keras')
+    models['base_bi_gru'] = keras.models.load_model('./models/bidirectional-gru.keras')
+    common_tickers = ['AAPL', 'MSFT']
+    for ticker in common_tickers:
+        for model in ['gru', 'lstm', 'rnn', 'bi_gru']:
+            val = fine_tune_model(models[f'base_{model}'], ticker)
+            models[f"{ticker}_{model}"] = val
+            print(models[f"{ticker}_{model}"])
     yield 
 
 app = FastAPI(lifespan=lifespan)
+
+def get_ticker_data(ticker: str):
+    stock_data = yf.Ticker(ticker).history(period='1y')
+    X_train = stock_data[['Open', 'Close', 'Low', 'High']].values[:-1]
+    y_train = stock_data['Close'].values[1:]
+    data = {'X_train': X_train, 'y_train': y_train}
+    return data
 
 @app.get('/')
 async def root() -> dict:
@@ -97,7 +120,7 @@ async def get_api_key(user: User):
         return {"message": str(e)}
     
 @lru_cache(maxsize=10)
-def fine_tune_model(base_model, stock_data):
+def fine_tune_model(base_model, ticker: str):
     """
     
 
@@ -106,5 +129,18 @@ def fine_tune_model(base_model, stock_data):
         stock_data (_type_): _description_
     """
     
+    stock_data = get_ticker_data(ticker)
+    model_copy = keras.models.clone_model(base_model)
+    model_copy.set_weights(base_model.get_weights())
+    
+    for layer in model_copy.layers[:-1]: # everything but the last layer
+        layer.trainable = False
+        
+    model_copy.compile(optimizer='adam', loss='mse')
+    history = model_copy.fit(stock_data['X_train'], stock_data['y_train'], epochs=1, verbose=0)
+    
+    final_loss = history.history['loss'][-1]
+    return model_copy, final_loss
+
     
     
