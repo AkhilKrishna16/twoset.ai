@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 import os
 from pydantic import BaseModel, EmailStr
 import uuid
+from functools import lru_cache
+import asyncio 
+import yfinance as yf
 
 class User(BaseModel):
     email: EmailStr
@@ -19,7 +22,7 @@ TABLE_NAME = os.getenv("TABLE")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Initialize database with given URL and key.  
+    Initialize database with given URL and key. Initialize models with fine tuning. 
 
     Args:
         app (FastAPI): the app instance used by FastAPI
@@ -92,3 +95,16 @@ async def get_api_key(user: User):
         return {"message": "API Key generated successfully!", "key": api_key}
     except Exception as e:
         return {"message": str(e)}
+    
+@lru_cache(maxsize=10)
+def fine_tune_model(base_model, stock_data):
+    """
+    
+
+    Args:
+        base_model (_type_): _description_
+        stock_data (_type_): _description_
+    """
+    
+    
+    
