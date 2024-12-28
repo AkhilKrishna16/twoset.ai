@@ -10,6 +10,8 @@ from functools import lru_cache
 import keras
 import asyncio 
 import yfinance as yf
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
 
 class User(BaseModel):
     email: EmailStr
@@ -37,11 +39,11 @@ async def lifespan(app: FastAPI):
     db = create_client(SUPABASE_URL, SUPABASE_KEY)
     models['base_gru'] = keras.models.load_model('./models/gru.keras')
     models['base_lstm'] = keras.models.load_model('./models/lstm.keras')
-    models['base_rnn'] = keras.models.load_model('./models/rnn.keras')
-    models['base_bi_gru'] = keras.models.load_model('./models/bidirectional-gru.keras')
+    # models['base_rnn'] = keras.models.load_model('./models/rnn.keras')
+    models['base_bi_gru'] = keras.models.load_model('./models/bi_gru.keras')
     common_tickers = ['AAPL', 'MSFT']
     for ticker in common_tickers:
-        for model in ['gru', 'lstm', 'rnn', 'bi_gru']:
+        for model in ['gru', 'lstm', 'bi_gru']:
             val = fine_tune_model(models[f'base_{model}'], ticker)
             models[f"{ticker}_{model}"] = val
             print(models[f"{ticker}_{model}"])
@@ -49,12 +51,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-def get_ticker_data(ticker: str):
-    stock_data = yf.Ticker(ticker).history(period='1y')
-    X_train = stock_data[['Open', 'Close', 'Low', 'High']].values[:-1]
-    y_train = stock_data['Close'].values[1:]
-    data = {'X_train': X_train, 'y_train': y_train}
-    return data
+def preprocess_ticker_data(ticker: str, timesteps=60):
+    stock_data = yf.Ticker(ticker).history(period='5y', interval='1d')
+    if stock_data.empty:
+        raise ValueError(f"No data found for ticker: {ticker}")
+    training_set = stock_data['Open'].values.reshape(-1, 1)
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    training_set_scaled = scaler.fit_transform(training_set)
+    X_train, y_train = [], []
+    for i in range(timesteps, len(training_set_scaled)):
+        X_train.append(training_set_scaled[i-timesteps:i, 0])
+        y_train.append(training_set_scaled[i, 0])
+    
+    X_train = np.array(X_train)
+    y_train = np.array(y_train)
+    
+    X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
+    return {
+        'X_train': X_train,
+        'y_train': y_train,
+        'scaler': scaler,
+    }
+
+def postprocess_ticker_data(predictions, scaler):
+    return scaler.inverse_transform(predictions)
 
 @app.get('/')
 async def root() -> dict:
@@ -129,14 +149,19 @@ def fine_tune_model(base_model, ticker: str):
         stock_data (_type_): _description_
     """
     
-    stock_data = get_ticker_data(ticker)
+    stock_data = preprocess_ticker_data(ticker)
     model_copy = keras.models.clone_model(base_model)
     model_copy.set_weights(base_model.get_weights())
     
-    for layer in model_copy.layers[:-1]: # everything but the last layer
+    for layer in model_copy.layers[:-1]: 
         layer.trainable = False
+    
+    if len(model_copy.layers[-1].trainable_weights) == 0:
+        model_copy.pop()
+        model_copy.add(keras.layers.Dense(units=1, activation='linear'))
         
     model_copy.compile(optimizer='adam', loss='mse')
+    postprocess_ticker_data(stock_data['y_train'].reshape(-1, 1), scaler=stock_data['scaler'])
     history = model_copy.fit(stock_data['X_train'], stock_data['y_train'], epochs=1, verbose=0)
     
     final_loss = history.history['loss'][-1]
