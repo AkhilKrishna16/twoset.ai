@@ -8,7 +8,6 @@ from pydantic import BaseModel, EmailStr
 import uuid
 from functools import lru_cache
 import keras
-import asyncio 
 import yfinance as yf
 from sklearn.preprocessing import MinMaxScaler
 import numpy as np
@@ -16,6 +15,12 @@ import numpy as np
 class User(BaseModel):
     email: EmailStr
     api_key: str
+    
+class MLInput(BaseModel):
+    ticker: str
+    model_type: str = 'lstm'
+    batch_size: int = 60
+    prediction_length: int = 50
     
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -39,22 +44,21 @@ async def lifespan(app: FastAPI):
     db = create_client(SUPABASE_URL, SUPABASE_KEY)
     models['base_gru'] = keras.models.load_model('./models/gru.keras')
     models['base_lstm'] = keras.models.load_model('./models/lstm.keras')
-    # models['base_rnn'] = keras.models.load_model('./models/rnn.keras')
     models['base_bi_gru'] = keras.models.load_model('./models/bi_gru.keras')
     common_tickers = ['AAPL', 'MSFT']
     for ticker in common_tickers:
         for model in ['gru', 'lstm', 'bi_gru']:
             val = fine_tune_model(models[f'base_{model}'], ticker)
             models[f"{ticker}_{model}"] = val
-            print(models[f"{ticker}_{model}"])
     yield 
 
 app = FastAPI(lifespan=lifespan)
 
 def preprocess_ticker_data(ticker: str, timesteps=60):
     stock_data = yf.Ticker(ticker).history(period='5y', interval='1d')
+    print(stock_data)
     if stock_data.empty:
-        raise ValueError(f"No data found for ticker: {ticker}")
+        return None
     training_set = stock_data['Open'].values.reshape(-1, 1)
     scaler = MinMaxScaler(feature_range=(0, 1))
     training_set_scaled = scaler.fit_transform(training_set)
@@ -139,7 +143,7 @@ async def get_api_key(user: User):
     except Exception as e:
         return {"message": str(e)}
     
-@lru_cache(maxsize=10)
+@lru_cache(maxsize=20)
 def fine_tune_model(base_model, ticker: str):
     """
     
@@ -150,22 +154,56 @@ def fine_tune_model(base_model, ticker: str):
     """
     
     stock_data = preprocess_ticker_data(ticker)
-    model_copy = keras.models.clone_model(base_model)
-    model_copy.set_weights(base_model.get_weights())
-    
-    for layer in model_copy.layers[:-1]: 
-        layer.trainable = False
-    
-    if len(model_copy.layers[-1].trainable_weights) == 0:
-        model_copy.pop()
-        model_copy.add(keras.layers.Dense(units=1, activation='linear'))
+    if stock_data:
+        model_copy = keras.models.clone_model(base_model)
+        model_copy.set_weights(base_model.get_weights())
         
-    model_copy.compile(optimizer='adam', loss='mse')
-    postprocess_ticker_data(stock_data['y_train'].reshape(-1, 1), scaler=stock_data['scaler'])
-    history = model_copy.fit(stock_data['X_train'], stock_data['y_train'], epochs=1, verbose=0)
-    
-    final_loss = history.history['loss'][-1]
-    return model_copy, final_loss
+        for layer in model_copy.layers[:-1]: 
+            layer.trainable = False
+        
+        if len(model_copy.layers[-1].trainable_weights) == 0:
+            model_copy.pop()
+            model_copy.add(keras.layers.Dense(units=1, activation='linear'))
+            
+        model_copy.compile(optimizer='adam', loss='mse')
+        postprocess_ticker_data(stock_data['y_train'].reshape(-1, 1), scaler=stock_data['scaler'])
+        history = model_copy.fit(stock_data['X_train'], stock_data['y_train'], epochs=1, verbose=0)
+        
+        final_loss = history.history['loss'][-1]
+        return model_copy, final_loss
+    return None
 
-    
-    
+@app.get('/model/predict')
+def predict(inputs: MLInput):
+    try:
+        model_key = f"{inputs.ticker}_{inputs.model_type}"
+        if model_key in models:
+            model, _ = models[model_key]
+        else:
+            updated_model = fine_tune_model(models[f'base_{inputs.model_type}'], inputs.ticker)
+            if updated_model:
+                models[model_key] = updated_model
+                model, _ = updated_model
+            else:
+                raise HTTPException(status_code=404, detail='Model could not be found.')
+            
+        post_ticker_data = preprocess_ticker_data(inputs.ticker, inputs.batch_size)
+        if not post_ticker_data:
+            raise HTTPException(status_code=404, detail='Insufficient data for testing.')
+
+        X_test = post_ticker_data['X_train'][-1:]
+        scaler = post_ticker_data['scaler']
+        
+        predictions = []
+        current_input = X_test
+        
+        for _ in range(inputs.prediction_length):
+            pred = model.predict(current_input, verbose=0)
+            predictions.append(pred[0, 0])
+            current_input = np.append(current_input[:, 1:, :], [[[pred[0, 0]]]], axis=1)
+        predictions = np.array(predictions).reshape(-1, 1)
+        predictions_processed = postprocess_ticker_data(predictions, scaler)
+        
+        return {'predictions': predictions_processed.flatten().tolist()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
