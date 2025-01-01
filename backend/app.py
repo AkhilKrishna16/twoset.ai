@@ -56,7 +56,6 @@ app = FastAPI(lifespan=lifespan)
 
 def preprocess_ticker_data(ticker: str, timesteps=60):
     stock_data = yf.Ticker(ticker).history(period='5y', interval='1d')
-    print(stock_data)
     if stock_data.empty:
         return None
     training_set = stock_data['Open'].values.reshape(-1, 1)
