@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "code-improver",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"decision\":\"block\",\"reason\":\"The code-improver subagent has finished. Now invoke the readme-updater subagent (defined in .claude/agents/readme-updater.md) to refresh README.md so it reflects the changes that were just made. Do not call code-improver again.\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}

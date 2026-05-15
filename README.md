@@ -6,6 +6,7 @@ A FastAPI-based backend service for stock price prediction using deep learning m
 
 - **Multiple Deep Learning Models**: Support for LSTM, GRU, Bidirectional GRU, and RNN architectures
 - **Stock Price Prediction**: Predict future stock prices for any ticker symbol
+- **DQN Trading Agent**: A from-scratch Double-DQN reinforcement-learning agent (PyTorch) that learns a discrete hold/buy/sell policy. Trains on a single ticker or a batch (e.g. the Mag-7) with one shared policy and reports per-ticker plus aggregate profit
 - **User Authentication**: Secure API key-based authentication system
 - **Model Fine-tuning**: Automatic fine-tuning of base models for specific stock tickers
 - **Real-time Data**: Fetches live stock data using Yahoo Finance API
@@ -18,9 +19,11 @@ The backend uses FastAPI with the following key components:
 
 - **FastAPI**: Modern, fast web framework for building APIs
 - **Keras/TensorFlow**: Deep learning models for stock price prediction
+- **PyTorch**: Reinforcement-learning agent (DQN trader) and supporting tensor ops
 - **Supabase**: Database and authentication service
 - **yfinance**: Yahoo Finance API for stock data
 - **scikit-learn**: Data preprocessing and scaling
+- **matplotlib**: Optional plotting for DQN evaluation runs
 
 ## 📋 Prerequisites
 
@@ -43,22 +46,25 @@ The backend uses FastAPI with the following key components:
 
 3. **Install dependencies**:
    ```bash
-   pip install fastapi uvicorn supabase python-dotenv keras tensorflow yfinance pandas scikit-learn numpy pydantic
+   pip install -r requirements.txt
    ```
 
-   Or create a `requirements.txt` file with the following:
+   The pinned dependency list lives in `requirements.txt` at the repo root and
+   currently includes:
+
    ```
-   fastapi>=0.104.0
-   uvicorn>=0.24.0
-   supabase>=2.0.0
-   python-dotenv>=1.0.0
-   keras>=2.14.0
-   tensorflow>=2.14.0
-   yfinance>=0.2.28
-   pandas>=2.0.0
-   scikit-learn>=1.3.0
-   numpy>=1.24.0
-   pydantic>=2.0.0
+   fastapi
+   uvicorn[standard]
+   python-dotenv
+   pydantic[email]
+   supabase
+   scikit-learn
+   keras
+   tensorflow
+   torch
+   numpy
+   yfinance
+   matplotlib
    ```
 
 4. **Set up environment variables**:
@@ -228,6 +234,54 @@ curl -X GET "http://localhost:8000/model/predict?ticker=AAPL&model_type=lstm&pre
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
+## 🎯 DQN Trading Agent
+
+The DQN trader is a standalone PyTorch script that trains a Double-DQN on
+historical OHLC data fetched via yfinance and evaluates it greedily on a
+held-out test split. It is not part of the FastAPI surface today; it runs
+directly from the command line.
+
+### Running
+
+From the repository root:
+
+```bash
+# Single ticker
+python -m backend.model_files.dqn_trader --ticker AAPL --episodes 25 --period 10y
+
+# Batch across the Mag-7 with one shared policy
+python -m backend.model_files.dqn_trader --tickers mag7 --episodes 25
+
+# Arbitrary basket
+python -m backend.model_files.dqn_trader --tickers AAPL,MSFT,NVDA
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ticker` | `AAPL` | Single ticker symbol passed to yfinance. Ignored if `--tickers` is set. |
+| `--tickers` | `None` | Comma-separated tickers or a group alias. Currently `mag7` expands to `AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA`. |
+| `--episodes` | `25` | Number of training episodes. In multi-ticker mode, each episode rolls one rollout per ticker (shuffled order). |
+| `--period` | `10y` | yfinance history period (e.g. `5y`, `10y`, `max`). |
+| `--plot` | off | If set, plot price + DQN actions and the portfolio-value curve on each test split. |
+| `--plot-path` | `None` | If set together with `--plot`, save figures to this path. With multiple tickers the ticker symbol is appended to the filename. |
+
+### Environment and reward
+
+- Single-asset trading environment with a `WINDOW = 30` day rolling
+  observation: the most recent log returns plus two portfolio-state scalars
+  (cash ratio and position ratio). The observation is ticker-agnostic, which
+  is what lets one shared policy train across a batch.
+- Starting bankroll: `$10,000` per ticker. Commission: `1 bp` per trade.
+- Reward: log return of mark-to-market portfolio value step-over-step, so
+  cumulative reward equals total log return over an episode.
+- Train/test split: the first 80% of each ticker's price history is used for
+  training, the final 20% for greedy evaluation. The run reports per-ticker
+  DQN test profit, the buy-and-hold baseline over the same window, the
+  `$2,000` profit target check, and an aggregate (sum + average) across the
+  batch.
+
 ## 🤖 Machine Learning Models
 
 ### Supported Model Types
@@ -247,6 +301,14 @@ curl -X GET "http://localhost:8000/model/predict?ticker=AAPL&model_type=lstm&pre
 4. **RNN (Simple Recurrent Network)**
    - Basic recurrent architecture
    - Simpler but less powerful
+
+5. **DQN Trading Agent (PyTorch)**
+   - Double-DQN with a GRU price-window encoder and an MLP Q-head
+   - Polyak (soft) target network updates and Huber (smooth L1) loss
+   - Epsilon-greedy exploration with multiplicative decay
+   - Replay buffer backed by pre-allocated NumPy ring buffers
+   - Discrete action space: `0 = HOLD`, `1 = BUY`, `2 = SELL`
+   - Reward is the log return of mark-to-market portfolio value per step
 
 ### Model Features
 
@@ -270,21 +332,26 @@ When a prediction is requested for a ticker:
 ## 📁 Project Structure
 
 ```
-backend/
-├── app.py                  # Main FastAPI application
-├── test.py                 # Test utilities
-├── models/                 # Pre-trained model files
-│   ├── gru.keras
-│   ├── lstm.keras
-│   ├── bi_gru.keras
-│   └── rnn.keras
-├── model_files/            # Model training scripts
-│   ├── generate_v1.py      # Model generation script
-│   ├── gru.ipynb
-│   ├── lstm.ipynb
-│   ├── bi_gru.ipynb
-│   └── rnn.ipynb
-└── README.md              # This file
+.
+├── README.md                       # This file
+├── LICENSE
+├── requirements.txt                # Python dependencies (used by `pip install -r`)
+└── backend/
+    ├── app.py                      # Main FastAPI application
+    ├── test.py                     # Test utilities
+    ├── models/                     # Pre-trained Keras model files
+    │   ├── gru.keras
+    │   ├── lstm.keras
+    │   ├── bi_gru.keras
+    │   └── rnn.keras
+    └── model_files/                # Model training notebooks + standalone scripts
+        ├── gru.ipynb
+        ├── lstm.ipynb
+        ├── bidirectional-gru.ipynb
+        ├── rnn.ipynb
+        ├── dqn_trader.py           # PyTorch Double-DQN trading agent (CLI)
+        ├── AAPL_stock_plot_lstm.png
+        └── tsla_run.png            # Sample DQN evaluation plot
 ```
 
 ## 🔒 Security
@@ -300,6 +367,7 @@ backend/
 - Stock market predictions are inherently uncertain
 - Models are fine-tuned on 5 years of historical data
 - Fine-tuning uses a single epoch for speed
+- The DQN trader is currently CLI-only and is not exposed via the FastAPI service
 
 ## 🐛 Troubleshooting
 

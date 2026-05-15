@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic[email]
+supabase
+scikit-learn
+keras
+tensorflow
+torch
+numpy
+yfinance
+matplotlib
